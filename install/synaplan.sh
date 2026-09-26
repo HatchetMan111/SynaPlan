@@ -353,6 +353,10 @@ write_env() {
 run_lifecycle() {
   pct exec "$CTID" -- bash -c 'set -euo pipefail; cd /opt/synaplan;
     deploy/scripts/prepare.sh;
+    # prepare.sh exportiert die Secrets nur in SEINER Shell. Compose braucht sie
+    # in DIESER Shell (Host-Env schlaegt --env-file): aus der autoritativen Datei
+    # exportieren – gleiche Werte wie validate-release.sh via ensure_deployment_secrets.
+    while IFS="=" read -r sk sv || [[ -n "$sk" ]]; do case "$sk" in ""|"#"*) continue;; [A-Z_]* ) export "$sk=$sv";; esac; done < deploy/data/secrets.env;
     docker compose --env-file deploy/.env -f deploy/compose.yaml pull;
     deploy/scripts/validate-release.sh;
     docker compose --env-file deploy/.env -f deploy/compose.yaml up -d;
