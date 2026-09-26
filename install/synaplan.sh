@@ -218,6 +218,18 @@ preflight() {
   if [[ "$DISK" -lt 20 ]]; then msg_warn "Disk ${DISK} GB < 20 GB – Images (~4 GB) + DB brauchen Platz."; fi
 }
 
+# Werte, die per sed in deploy/.env interpoliert werden, duerfen keine
+# sed-/Shell-Sonderzeichen enthalten (sonst korrupte .env oder Injection).
+validate_inputs() {
+  case "$ADMIN_EMAIL" in *@*.*) ;; *) msg_error "ADMIN_EMAIL ung\u00fcltig: $ADMIN_EMAIL"; exit 10 ;; esac
+  local v="$ADMIN_EMAIL${DOMAIN:-}"
+  local stripped="${v//[A-Za-z0-9@._:+\/\-]/}"
+  [[ -z "$stripped" ]] || { msg_error "ADMIN_EMAIL/DOMAIN enthalten unzul\u00e4ssige Zeichen."; exit 10; }
+  if [[ -n "${ADMIN_PASSWORD_ARG:-}" ]] && [[ ! "$ADMIN_PASSWORD" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    msg_error "Eigenes ADMIN_PASSWORD: nur Buchstaben/Ziffern sowie . _ - erlaubt (sed-sicher)."; exit 10
+  fi
+}
+
 pick_storage() {
   if [[ -n "$STORAGE_ARG" ]]; then STORAGE="$STORAGE_ARG"; return; fi
   if pvesm status 2>/dev/null | awk '$2=="dir" || $2=="lvmthin" || $2=="zfspool" {print $1}' | grep -qx "local-lvm"; then STORAGE="local-lvm"; return; fi
@@ -331,7 +343,9 @@ write_env() {
         -e "s|^BOOTSTRAP_ADMIN_PASSWORD=.*|BOOTSTRAP_ADMIN_PASSWORD='"$ADMIN_PASSWORD"'|" \
         deploy/selfhost.env.example > deploy/.env;
     sed -i "s|^SYNAPLAN_VERSION=.*|SYNAPLAN_VERSION='"$SYNAPLAN_VERSION"'|" deploy/.env;
-    printf "\nSYNAPLAN_HTTP_BIND=0.0.0.0\nSYNAPLAN_HTTP_PORT='"$PORT"'\nBOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=true\n" >> deploy/.env;
+    grep -q "^SYNAPLAN_HTTP_BIND=" deploy/.env && sed -i "s|^SYNAPLAN_HTTP_BIND=.*|SYNAPLAN_HTTP_BIND=0.0.0.0|" deploy/.env || echo "SYNAPLAN_HTTP_BIND=0.0.0.0" >> deploy/.env;
+    grep -q "^SYNAPLAN_HTTP_PORT=" deploy/.env && sed -i "s|^SYNAPLAN_HTTP_PORT=.*|SYNAPLAN_HTTP_PORT='"$PORT"'|" deploy/.env || echo "SYNAPLAN_HTTP_PORT='"$PORT"'" >> deploy/.env;
+    grep -q "^BOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=" deploy/.env && sed -i "s|^BOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=.*|BOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=true|" deploy/.env || echo "BOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=true" >> deploy/.env;
     chmod 600 deploy/.env'
   msg_ok "deploy/.env geschrieben (600)."
 }
@@ -414,7 +428,8 @@ main() {
   setup_lxc; resolve_version
   local base
   base="$(url_base)"
-  write_env "$base"; run_lifecycle; install_systemd; verify; print_final "$base"
+  validate_inputs; write_env "$base"; run_lifecycle; install_systemd; verify; print_final "$base"
+  msg_warn "Das Log $LOG_FILE enthält das Admin-Passwort – nach dem Notieren löschen: shred -u \"$LOG_FILE\""
 }
 
 main "$@"

@@ -121,7 +121,7 @@ pct stop 100 && pct destroy 100
 
 ## 5. Debugging (komplette Fehlermeldungskette)
 
-- Jeder Lauf loggt **stdout+stderr vollständig** nach `/tmp/synaplan-install-<Datum>.log`.
+- Jeder Lauf loggt **stdout+stderr vollständig** nach `/tmp/synaplan-install-<Datum>.log` (enthält auch das angezeigte Admin-Passwort — nach dem Notieren löschen: `shred -u /tmp/synaplan-install-*.log`).
 - Bei Fehlern druckt das Skript: Befehl, Zeile, Exit-Code, Stacktrace
   (`caller`), `pct config`/`pct status`, `journalctl -u synaplan -n 100`,
   `systemctl status synaplan`, `docker ps -a`, `compose logs --tail=100` —
