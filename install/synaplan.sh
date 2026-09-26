@@ -268,3 +268,105 @@ get_ct_ip() {
   done
   msg_error "Keine DHCP-IP für CT $CTID nach 150 s."; exit 5
 }
+
+# ---------------------------------------------------------------------------
+# LXC-Teil: Docker, Clone, deploy/.env, Lifecycle, systemd (Task 4)
+# ---------------------------------------------------------------------------
+setup_lxc() {
+  pct exec "$CTID" -- bash -c 'set -euo pipefail; apt-get update; apt-get install -y ca-certificates curl gnupg git openssl iproute2;
+    install -m 0755 -d /etc/apt/keyrings;
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg;
+    echo "deb [signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list;
+    apt-get update; apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin;
+    docker --version; docker compose version'
+  pct exec "$CTID" -- bash -c 'set -euo pipefail; if [ -d /opt/synaplan/.git ]; then git -C /opt/synaplan fetch --depth 1 origin "$0"; git -C /opt/synaplan reset --hard FETCH_HEAD; else git clone --depth 1 --branch "'"$UPSTREAM_BRANCH"'" "'"$UPSTREAM_REPO"'" /opt/synaplan; fi' "$UPSTREAM_BRANCH"
+  msg_ok "Docker + Synaplan-Checkout bereit."
+}
+
+resolve_version() {
+  if [[ -n "$PIN_VERSION" ]]; then SYNAPLAN_VERSION="$PIN_VERSION"; return; fi
+  SYNAPLAN_VERSION="$(curl -fsSL "$RELEASES_API" 2>/dev/null | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -1 || true)"
+  if [[ -z "${SYNAPLAN_VERSION:-}" ]]; then SYNAPLAN_VERSION="1.0.0"; msg_warn "Release-API offline – Fallback SYNAPLAN_VERSION=1.0.0."; fi
+  msg_info "SYNAPLAN_VERSION=$SYNAPLAN_VERSION"
+}
+
+url_base() {
+  if [[ -n "${DOMAIN:-}" ]]; then
+    case "$DOMAIN" in
+      https://*) ;;
+      http://*) msg_warn "Plain-http-Domain konfiguriert – vor echten Nutzern HTTPS-Proxy davor." ;;
+      *) msg_error "DOMAIN muss mit https:// beginnen (ist: $DOMAIN)."; exit 8 ;;
+    esac
+    printf '%s' "$DOMAIN"
+  else
+    printf 'http://%s:%s' "$CT_IP" "$PORT"
+  fi
+}
+
+write_env() {
+  local base="$1"
+  local env_file="/opt/synaplan/deploy/.env"
+  if pct exec "$CTID" -- test -f "$env_file"; then
+    msg_info "deploy/.env existiert – Secrets bleiben, aktualisiere nur IP/Version."
+    pct exec "$CTID" -- bash -c 'set -euo pipefail; cd /opt/synaplan/deploy;
+      sed -i "s|^APP_URL=.*|APP_URL='"$base"'|; s|^FRONTEND_URL=.*|FRONTEND_URL='"$base"'|" .env;
+      sed -i "s|^SYNAPLAN_VERSION=.*|SYNAPLAN_VERSION='"$SYNAPLAN_VERSION"'|" .env;
+      grep -q "^SYNAPLAN_HTTP_BIND=" .env && sed -i "s|^SYNAPLAN_HTTP_BIND=.*|SYNAPLAN_HTTP_BIND=0.0.0.0|" .env || echo "SYNAPLAN_HTTP_BIND=0.0.0.0" >> .env;
+      grep -q "^SYNAPLAN_HTTP_PORT=" .env && sed -i "s|^SYNAPLAN_HTTP_PORT=.*|SYNAPLAN_HTTP_PORT='"$PORT"'|" .env || echo "SYNAPLAN_HTTP_PORT='"$PORT"'" >> .env'
+    return
+  fi
+  [[ -z "${ADMIN_PASSWORD:-}" ]] && ADMIN_PASSWORD="$(openssl rand -hex 16)"
+  local pwlen=${#ADMIN_PASSWORD}
+  if [[ "$pwlen" -lt 8 || "$pwlen" -gt 64 ]]; then msg_error "Admin-Passwort muss 8-64 Zeichen haben (ist $pwlen)."; exit 6; fi
+  msg_info "Admin-Passwort-Länge: $pwlen Zeichen (Wert nur in Final-Box)."
+  pct exec "$CTID" -- bash -c 'set -euo pipefail; cd /opt/synaplan;
+    [ -f deploy/selfhost.env.example ] || { echo "selfhost.env.example fehlt" >&2; exit 7; };
+    sed -e "s|^APP_SECRET=.*|APP_SECRET=|" -e "s|^TOKEN_SECRET=.*|TOKEN_SECRET=|" \
+        -e "s|^MARIADB_PASSWORD=.*|MARIADB_PASSWORD=|" -e "s|^MARIADB_ROOT_PASSWORD=.*|MARIADB_ROOT_PASSWORD=|" \
+        -e "s|^REALTIME_API_KEY=.*|REALTIME_API_KEY=|" -e "s|^REALTIME_TOKEN_SECRET=.*|REALTIME_TOKEN_SECRET=|" \
+        -e "s|^REALTIME_ADMIN_PASSWORD=.*|REALTIME_ADMIN_PASSWORD=|" -e "s|^REALTIME_ADMIN_SECRET=.*|REALTIME_ADMIN_SECRET=|" \
+        -e "s|^APP_URL=.*|APP_URL='"$base"'|" \
+        -e "s|^FRONTEND_URL=.*|FRONTEND_URL='"$base"'|" \
+        -e "s|^BOOTSTRAP_ADMIN_EMAIL=.*|BOOTSTRAP_ADMIN_EMAIL='"$ADMIN_EMAIL"'|" \
+        -e "s|^BOOTSTRAP_ADMIN_PASSWORD=.*|BOOTSTRAP_ADMIN_PASSWORD='"$ADMIN_PASSWORD"'|" \
+        deploy/selfhost.env.example > deploy/.env;
+    sed -i "s|^SYNAPLAN_VERSION=.*|SYNAPLAN_VERSION='"$SYNAPLAN_VERSION"'|" deploy/.env;
+    printf "\nSYNAPLAN_HTTP_BIND=0.0.0.0\nSYNAPLAN_HTTP_PORT='"$PORT"'\nBOOTSTRAP_ADMIN_FORCE_PASSWORD_CHANGE=true\n" >> deploy/.env;
+    chmod 600 deploy/.env'
+  msg_ok "deploy/.env geschrieben (600)."
+}
+
+run_lifecycle() {
+  pct exec "$CTID" -- bash -c 'set -euo pipefail; cd /opt/synaplan;
+    deploy/scripts/prepare.sh;
+    docker compose --env-file deploy/.env -f deploy/compose.yaml pull;
+    deploy/scripts/validate-release.sh;
+    docker compose --env-file deploy/.env -f deploy/compose.yaml up -d;
+    deploy/scripts/smoke-test.sh'
+  msg_ok "Deploy-Lifecycle (prepare/pull/validate/up/smoke-test) OK."
+}
+
+install_systemd() {
+  pct exec "$CTID" -- bash -c 'cat > /etc/systemd/system/synaplan.service <<UNIT
+[Unit]
+Description=Synaplan – AI Control Plane (deploy/compose.yaml)
+Documentation=https://github.com/metadist/synaplan
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/synaplan/deploy
+ExecStart=/usr/bin/docker compose --env-file .env -f compose.yaml up -d
+ExecStop=/usr/bin/docker compose --env-file .env -f compose.yaml stop
+ExecReload=/usr/bin/docker compose --env-file .env -f compose.yaml up -d
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl daemon-reload; systemctl enable --now synaplan'
+  msg_ok "systemd-Unit synaplan enabled + gestartet."
+}
