@@ -370,3 +370,51 @@ UNIT
   systemctl daemon-reload; systemctl enable --now synaplan'
   msg_ok "systemd-Unit synaplan enabled + gestartet."
 }
+
+# ---------------------------------------------------------------------------
+# Verifikation + Final-Box (Task 5)
+# ---------------------------------------------------------------------------
+verify() {
+  pct exec "$CTID" -- systemctl is-active synaplan | grep -q "active" || { msg_error "Service synaplan nicht active."; return 1; }
+  msg_ok "Service läuft (systemctl is-active synaplan = active)."
+  local i=0
+  while [[ $i -lt 120 ]]; do
+    if pct exec "$CTID" -- curl -fs http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+      msg_ok "Web UI antwortet (HTTP 200 auf localhost:8000/api/health)."
+      return 0
+    fi
+    sleep 5; i=$((i+1))
+  done
+  msg_error "Web UI antwortet nicht nach 600 s (Erststart zieht ~4 GB Images)."; return 1
+}
+
+print_final() {
+  local base="$1"
+  cat <<EOF
+
+════════ INSTALLATION ERFOLGREICH ════════
+  App       : Synaplan – AI Control Plane
+  Container : CT $CTID (Hostname: $HOSTNAME_ARG, onboot=1)
+  Ressourcen: $CORES vCPU / $RAM MB RAM / $DISK GB Disk
+  Web UI    : $base
+  API-Docs  : $base/api/doc
+  Admin     : $ADMIN_EMAIL / $ADMIN_PASSWORD (nur jetzt – beim Login ändern!)
+  Service   : pct enter $CTID → systemctl status synaplan
+  Stack     : pct exec $CTID -- docker compose -f /opt/synaplan/deploy/compose.yaml ps
+  Update    : bash synaplan.sh --ctid $CTID (idempotent, pull + restart)
+  Deinstall : pct stop $CTID && pct destroy $CTID
+  Reboot    : pct reboot $CTID && sleep 90 && curl -fs $base/api/health
+  Log       : $LOG_FILE
+══════════════════════════════════════════
+EOF
+}
+
+main() {
+  preflight; pick_storage; pick_template; create_ct; get_ct_ip
+  setup_lxc; resolve_version
+  local base
+  base="$(url_base)"
+  write_env "$base"; run_lifecycle; install_systemd; verify; print_final "$base"
+}
+
+main "$@"
