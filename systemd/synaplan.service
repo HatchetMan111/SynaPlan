@@ -1,0 +1,18 @@
+[Unit]
+Description=Synaplan – AI Control Plane (deploy/compose.yaml: backend+worker+scheduler+db+redis+centrifugo+tika+qdrant+tts)
+Documentation=https://github.com/metadist/synaplan
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/synaplan/deploy
+ExecStart=/usr/bin/docker compose --env-file .env -f compose.yaml up -d
+ExecStop=/usr/bin/docker compose --env-file .env -f compose.yaml stop
+ExecReload=/usr/bin/docker compose --env-file .env -f compose.yaml up -d
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
