@@ -204,3 +204,67 @@ CT_IP=""
 SYNAPLAN_VERSION=""
 STORAGE=""
 TEMPLATE=""
+
+# ---------------------------------------------------------------------------
+# Host-Teil: Preflight, Storage/Template, CT-Erstellung, IP (Task 3)
+# ---------------------------------------------------------------------------
+preflight() {
+  [[ "$(id -u)" -eq 0 ]] || { msg_error "Als root auf dem Proxmox-Host ausführen."; exit 1; }
+  for bin in pct pveam pvesh wget openssl; do
+    command -v "$bin" >/dev/null 2>&1 || { msg_error "'$bin' fehlt. Auf Proxmox-Host laufen lassen."; exit 2; }
+  done
+  if [[ -z "$CTID" ]]; then CTID="$(pvesh get /cluster/nextid)"; msg_info "CT-ID: nächste freie ID = $CTID"; fi
+  if [[ "$RAM" -lt 6144 ]]; then msg_warn "RAM ${RAM} MB < 6144 MB – Synaplan braucht offiziell 8 GB. OOM möglich."; fi
+  if [[ "$DISK" -lt 20 ]]; then msg_warn "Disk ${DISK} GB < 20 GB – Images (~4 GB) + DB brauchen Platz."; fi
+}
+
+pick_storage() {
+  if [[ -n "$STORAGE_ARG" ]]; then STORAGE="$STORAGE_ARG"; return; fi
+  if pvesm status 2>/dev/null | awk '$2=="dir" || $2=="lvmthin" || $2=="zfspool" {print $1}' | grep -qx "local-lvm"; then STORAGE="local-lvm"; return; fi
+  STORAGE="$(pvesm status 2>/dev/null | awk '$3 ~ /rootdir/ || $2=="dir" {print $1}' | head -1)"
+  [[ -n "${STORAGE:-}" ]] || { msg_error "Kein RootFS-Storage gefunden."; exit 3; }
+  msg_info "RootFS-Storage: $STORAGE"
+}
+
+pick_template() {
+  local avail=""
+  avail="$(pveam available --section system 2>/dev/null | grep -o "${DEFAULT_OS}[^\"]*amd64.tar.zst" | sort -V | tail -1 || true)"
+  if [[ -z "$avail" ]]; then avail="$(pveam available --section system 2>/dev/null | grep -o "${DEFAULT_OS}[^\"]*amd64.tar.gz" | sort -V | tail -1 || true)"; fi
+  [[ -n "$avail" ]] || { msg_error "Kein ${DEFAULT_OS}-Template gefunden."; exit 4; }
+  if ! pveam list "$TEMPLATE_STORE" 2>/dev/null | grep -q "$DEFAULT_OS"; then
+    msg_info "Lade Template $avail ..."
+    pveam download "$TEMPLATE_STORE" "$avail"
+  fi
+  TEMPLATE="$(pveam list "$TEMPLATE_STORE" 2>/dev/null | grep -o "[^ ]*${DEFAULT_OS}[^ ]*" | sort -V | tail -1)"
+  [[ -n "$TEMPLATE" ]] || { msg_error "Template-Liste leer nach Download."; exit 4; }
+  msg_info "Template: $TEMPLATE"
+}
+
+create_ct() {
+  if pct status "$CTID" >/dev/null 2>&1; then
+    msg_info "CT $CTID existiert – Re-Run (idempotent), kein neues pct create."
+    pct start "$CTID" 2>/dev/null || true
+    return
+  fi
+  [[ -z "${ROOT_PASSWORD:-}" ]] && ROOT_PASSWORD="$(openssl rand -hex 12)"
+  local ssh_opt=()
+  [[ -n "${SSH_KEY:-}" ]] && ssh_opt=(--ssh-public-keys "$SSH_KEY")
+  pct create "$CTID" "${TEMPLATE_STORE}:vztmpl/${TEMPLATE##*/}" \
+    --hostname "$HOSTNAME_ARG" --cores "$CORES" --memory "$RAM" --swap "$DEFAULT_SWAP" \
+    --rootfs "${STORAGE}:${DISK}" --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \
+    --unprivileged "$UNPRIVILEGED" --features "$FEATURES" --onboot 1 --password "$ROOT_PASSWORD" \
+    "${ssh_opt[@]}"
+  pct start "$CTID"
+  sleep 5
+  msg_ok "Container CT $CTID ($HOSTNAME_ARG) erstellt und gestartet."
+}
+
+get_ct_ip() {
+  local ip="" i=0
+  while [[ $i -lt 30 ]]; do
+    ip="$(pct exec "$CTID" -- ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+    [[ -n "$ip" ]] && { CT_IP="$ip"; msg_ok "Container-IP: $CT_IP"; return 0; }
+    sleep 5; i=$((i+1))
+  done
+  msg_error "Keine DHCP-IP für CT $CTID nach 150 s."; exit 5
+}
