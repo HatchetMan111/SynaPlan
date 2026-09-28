@@ -417,6 +417,9 @@ print_final() {
   Web UI    : $base
   API-Docs  : $base/api/doc
   Admin     : $ADMIN_EMAIL / $ADMIN_PASSWORD (nur jetzt – beim Login ändern!)
+  Login     : direkt mit obigem Admin einloggen – keine Registrierung /
+               Bestätigungs-Mail nötig (lokal wird ohne SMTP nichts versendet).
+  Passwort vergessen? pct exec $CTID -- grep BOOTSTRAP_ADMIN_PASSWORD /opt/synaplan/deploy/.env
   Service   : pct enter $CTID → systemctl status synaplan
   Stack     : pct exec $CTID -- docker compose -f /opt/synaplan/deploy/compose.yaml ps
   Update    : bash synaplan.sh --ctid $CTID (idempotent, pull + restart)

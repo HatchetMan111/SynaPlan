@@ -70,6 +70,9 @@ Erwartete Schlussausgabe (Beispiel):
   Web UI    : http://192.168.1.100:8000
   API-Docs  : http://192.168.1.100:8000/api/doc
   Admin     : admin@synaplan.local / aB3... (nur jetzt – beim Login ändern!)
+  Login     : direkt mit obigem Admin einloggen – keine Registrierung /
+               Bestätigungs-Mail nötig (lokal wird ohne SMTP nichts versendet).
+  Passwort vergessen? pct exec 100 -- grep BOOTSTRAP_ADMIN_PASSWORD /opt/synaplan/deploy/.env
   Service   : pct enter 100 → systemctl status synaplan
   Stack     : pct exec 100 -- docker compose -f /opt/synaplan/deploy/compose.yaml ps
   Update    : bash synaplan.sh --ctid 100 (idempotent, pull + restart)
